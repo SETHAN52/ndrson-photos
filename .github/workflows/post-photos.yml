@@ -1,0 +1,65 @@
+name: Post photos
+
+on:
+  schedule:
+    - cron: '4,19,34,49 * * * *'   # every 15 min (UTC); GitHub may delay scheduled runs
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+
+concurrency:
+  group: post-photos
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: scripts/requirements.txt
+
+      - name: Install dependencies
+        run: pip install --quiet -r scripts/requirements.txt
+
+      # Secrets are passed only via env; the script prints counts only.
+      - name: Fetch and process new photos
+        id: fetch
+        env:
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
+          NDRSON_INBOX_ID: ${{ secrets.NDRSON_INBOX_ID }}
+          NDRSON_ALLOWLIST: ${{ secrets.NDRSON_ALLOWLIST }}
+        run: python scripts/post_photos.py fetch --pending "$RUNNER_TEMP/pending.json"
+
+      - name: Commit and push
+        id: commit
+        run: |
+          if [ -n "$(git status --porcelain -- photos posts.json index.html)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898283+github-actions[bot]@users.noreply.github.com"
+            git add photos posts.json index.html
+            git commit --quiet -m "Add ${{ steps.fetch.outputs.photos }} photo(s)"
+            git push --quiet
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Nothing new."
+          fi
+
+      - name: Request Pages build
+        if: steps.commit.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/${{ github.repository }}/pages/builds" --silent || true
+
+      - name: Label processed messages
+        env:
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
+          NDRSON_INBOX_ID: ${{ secrets.NDRSON_INBOX_ID }}
+        run: python scripts/post_photos.py label --pending "$RUNNER_TEMP/pending.json"
