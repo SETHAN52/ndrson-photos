@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ndrson.com</title>
+<meta name="description" content="The Anderson family daily photo, taken at 12:34.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='80'%3E%F0%9F%93%B7%3C/text%3E%3C/svg%3E">
+<style>
+  :root { --bg:#faf8f5; --fg:#222; --muted:#8a847c; --accent:#c8553d; --card:#fff; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#141312; --fg:#eee; --muted:#9a948c; --card:#1e1d1b; } }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { text-align:center; padding:3rem 1rem 1.5rem; }
+  h1 { margin:0; font-size:2.2rem; letter-spacing:.02em; font-weight:700; }
+  .clock { font-variant-numeric:tabular-nums; color:var(--accent); font-weight:600; letter-spacing:.08em; }
+  .tag { color:var(--muted); margin:.35rem 0 0; font-size:.95rem; }
+  main { max-width:720px; margin:0 auto; padding:0 1rem 4rem; }
+  article { background:var(--card); border-radius:14px; overflow:hidden; margin:0 0 2rem;
+            box-shadow:0 1px 3px rgba(0,0,0,.08), 0 6px 20px rgba(0,0,0,.05); }
+  article img { display:block; width:100%; height:auto; background:#ddd; }
+  .meta { display:flex; justify-content:space-between; align-items:baseline; gap:1rem; padding:.8rem 1rem .2rem; }
+  .who { font-weight:600; }
+  .when { color:var(--muted); font-size:.9rem; white-space:nowrap; }
+  .badge { color:var(--accent); font-weight:600; font-size:.8rem; margin-left:.4rem; letter-spacing:.05em; }
+  .cap { padding:0 1rem .9rem; margin:0; }
+  .meta + .cap:empty { display:none; }
+  article .pad { height:.6rem; }
+  .empty { text-align:center; color:var(--muted); padding:4rem 1rem; }
+  .empty .clock { font-size:3rem; display:block; margin-bottom:.5rem; }
+  footer { text-align:center; color:var(--muted); font-size:.85rem; padding:0 1rem 3rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ndrson.com</h1>
+  <p class="tag">a photo a day at <span class="clock">12:34</span></p>
+</header>
+<main>
+<div class="empty"><span class="clock">12:34</span>No photos yet. The first one is coming soon.</div>
+</main>
+<footer></footer>
+</body>
+</html>
