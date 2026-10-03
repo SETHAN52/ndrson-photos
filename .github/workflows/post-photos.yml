@@ -2,7 +2,7 @@ name: Post photos
 
 on:
   schedule:
-    - cron: '4,19,34,49 * * * *'   # every 15 min (UTC); GitHub may delay scheduled runs
+    - cron: '7,22,37,52 * * * *'   # every 15 min (UTC); GitHub may delay or skip scheduled runs
   workflow_dispatch:
 
 permissions:
@@ -18,9 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip

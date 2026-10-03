@@ -269,7 +269,7 @@ def cmd_fetch(a):
     posts = load_posts()
     have = {p["id"] for p in posts}
     pending = {"posted": [], "ignored": []}
-    stats = dict(seen=0, new=0, posted_msgs=0, photos=0, ignored=0, errors=0)
+    stats = dict(seen=0, new=0, already_posted=0, posted_msgs=0, photos=0, ignored=0, errors=0)
     os.makedirs(os.path.join(ROOT, "photos"), exist_ok=True)
     for item in mail.list_all():
         stats["seen"] += 1
@@ -282,9 +282,13 @@ def cmd_fetch(a):
         if not name:
             pending["ignored"].append(mid); stats["ignored"] += 1
             continue
+        key = key_for(mid)
+        if any(h.startswith(key + "-") for h in have):
+            # Already on the site (labelling failed earlier): never re-post, just retry the label.
+            pending["posted"].append(mid); stats["already_posted"] += 1
+            continue
         try:
             msg = mail.get(mid)
-            key = key_for(mid)
             local = parse_ts(msg.get("timestamp")).astimezone(TZ)
             atts = msg.get("attachments") or []
             texts = []
@@ -331,18 +335,26 @@ def cmd_fetch(a):
 
 
 def cmd_label(a):
+    """Best-effort labelling. Never fails the run: posts.json dedupe (by hashed message id)
+    already guarantees nothing is posted twice if a label can't be applied."""
     if not os.path.exists(a.pending):
         print("summary labelled=0"); return 0
     pending = json.load(open(a.pending))
-    mail, done, failed = Mail(), 0, 0
+    mail, done, failed, reason = Mail(), 0, 0, ""
     for lab, ids in ((POSTED, pending.get("posted", [])), (IGNORED, pending.get("ignored", []))):
         for mid in ids:
+            if reason == "HTTP 403":
+                failed += 1; continue  # key lacks permission; don't hammer the API
             try:
                 mail.label(mid, lab); done += 1
-            except Exception:
+            except Exception as e:
                 failed += 1
+                m = re.search(r"HTTP \d+", str(e)); reason = m.group(0) if m else type(e).__name__
     print(f"summary labelled={done} label_failures={failed}")
-    return 1 if failed else 0
+    if failed:
+        hint = " (API key lacks the message_update permission)" if reason == "HTTP 403" else ""
+        print(f"::warning::Could not label {failed} message(s): {reason}{hint}. Dedupe prevents re-posting.")
+    return 0
 
 
 def main():
@@ -358,4 +370,10 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:  # never let a traceback (URLs contain the inbox id) reach public logs
+        print(f"fatal: {type(e).__name__}")
+        sys.exit(1)
