@@ -2,8 +2,9 @@
 """Post family photos from a private email inbox to this static site.
 
 All private data comes from environment variables (GitHub Actions secrets):
-  AGENTMAIL_API_KEY   AgentMail API key (inbox-scoped is enough)
-  NDRSON_INBOX_ID     the private inbox id
+  AGENTMAIL_API_KEY   AgentMail API key with read (+ optional label) access to every inbox below
+  NDRSON_INBOX_ID     the private posting inbox id (comma-separated list allowed)
+  NDRSON_REMINDER_INBOX_ID  optional: the daily-reminder inbox id(s); family replies there are posted too
   NDRSON_ALLOWLIST    JSON: {"family": [{"name": "...", "phones": ["10digits"], "emails": ["..."]}]}
 Nothing private is written to the repo or printed: logs contain counts only.
 
@@ -46,11 +47,17 @@ def api_key():
     return k
 
 
-def inbox_id():
-    v = os.environ.get("NDRSON_INBOX_ID", "").strip()
-    if not v:
+def inbox_ids():
+    """All inboxes to read, in a stable order. Values come from secrets only and are never printed."""
+    out = []
+    for var in ("NDRSON_INBOX_ID", "NDRSON_REMINDER_INBOX_ID"):
+        for v in os.environ.get(var, "").split(","):
+            v = v.strip()
+            if v and v.lower() not in [o.lower() for o in out]:
+                out.append(v)
+    if not out:
         sys.exit("missing NDRSON_INBOX_ID")
-    return v
+    return out
 
 
 def family():
@@ -61,15 +68,17 @@ def family():
 
 
 class Mail:
-    def __init__(self):
-        self.s = requests.Session()
+    def __init__(self, inbox, n=1, session=None):
+        self.n = n  # 1-based position, used in logs instead of the (private) inbox id
+        self.addr = inbox.strip().lower()
+        self.s = session or requests.Session()
         self.s.headers["Authorization"] = "Bearer " + api_key()
-        self.base = f"{API}/inboxes/{quote(inbox_id(), safe='')}"
+        self.base = f"{API}/inboxes/{quote(inbox, safe='')}"
 
     def _req(self, method, path, **kw):
         r = self.s.request(method, self.base + path, timeout=60, **kw)
         if r.status_code >= 400:
-            raise RuntimeError(f"AgentMail {method} {path.split('/')[1] if '/' in path else path} -> HTTP {r.status_code}")
+            raise RuntimeError(f"AgentMail inbox#{self.n} {method} {path.split('/')[1] if '/' in path else path} -> HTTP {r.status_code}")
         return r.json() if r.content else {}
 
     def list_all(self):
@@ -115,7 +124,7 @@ def sender_name(from_header, fam):
 
 
 PII_RE = re.compile(r"[\w.+-]+@[\w-]+(\.[\w-]+)+|\+?1?[\s.(-]*\d{3}[\s.)-]*\d{3}[\s.-]*\d{4}|https?://\S+")
-JUNK = {"", "(no subject)", "no subject", "mms", "multimedia message", "photo", "image", "picture",
+JUNK = {"", "12:34", "(no subject)", "no subject", "mms", "multimedia message", "photo", "image", "picture",
         "pic", "text message", "new message", "sent from my iphone"}
 
 
@@ -126,6 +135,8 @@ def clean_caption(*cands):
         s = re.sub(r"\s+", " ", s).strip()
         s = re.sub(r"^(fwd?|re):\s*", "", s, flags=re.I)
         s = PII_RE.sub("", s).strip(" -–:")
+        if re.search(r"selfie time|sent via agentmail", s, re.I):
+            continue  # quoted text of our own daily reminder
         if s and s.lower() not in JUNK and len(s) <= 140:
             return s
     return ""
@@ -265,27 +276,35 @@ def render():
 
 # ---------------- commands ----------------
 def cmd_fetch(a):
-    fam, mail = family(), Mail()
+    fam = family()
+    session = requests.Session()
+    mails = [Mail(ib, i + 1, session) for i, ib in enumerate(inbox_ids())]
+    own = {m.addr for m in mails}
     posts = load_posts()
     have = {p["id"] for p in posts}
     pending = {"posted": [], "ignored": []}
-    stats = dict(seen=0, new=0, already_posted=0, posted_msgs=0, photos=0, ignored=0, errors=0)
+    stats = dict(inboxes=len(mails), seen=0, own=0, new=0, already_posted=0, posted_msgs=0, photos=0, ignored=0, errors=0)
     os.makedirs(os.path.join(ROOT, "photos"), exist_ok=True)
-    for item in mail.list_all():
+    for mail, item in ((m, it) for m in mails for it in m.list_all()):
         stats["seen"] += 1
         labels = set(item.get("labels") or [])
-        if POSTED in labels or IGNORED in labels or "sent" in labels:
+        frm = parseaddr(item.get("from") or "")[1].strip().lower()
+        if "sent" in labels or frm in own:
+            stats["own"] += 1  # e.g. the daily reminder the inbox sent itself
+            continue
+        if POSTED in labels or IGNORED in labels:
             continue
         stats["new"] += 1
         mid = item["message_id"]
+        ref = [mail.n, mid]
         name = sender_name(item.get("from"), fam)
         if not name:
-            pending["ignored"].append(mid); stats["ignored"] += 1
+            pending["ignored"].append(ref); stats["ignored"] += 1
             continue
         key = key_for(mid)
         if any(h.startswith(key + "-") for h in have):
             # Already on the site (labelling failed earlier): never re-post, just retry the label.
-            pending["posted"].append(mid); stats["already_posted"] += 1
+            pending["posted"].append(ref); stats["already_posted"] += 1
             continue
         try:
             msg = mail.get(mid)
@@ -316,9 +335,9 @@ def cmd_fetch(a):
                               "w": w, "h": h, "caption": caption if made == 0 else "", "at1234": bool(at1234)})
                 have.add(pid); made += 1; stats["photos"] += 1
             if made:
-                pending["posted"].append(mid); stats["posted_msgs"] += 1
+                pending["posted"].append(ref); stats["posted_msgs"] += 1
             else:
-                pending["ignored"].append(mid); stats["ignored"] += 1
+                pending["ignored"].append(ref); stats["ignored"] += 1
         except Exception as e:
             stats["errors"] += 1
             print(f"error processing a message: {type(e).__name__}")
@@ -340,13 +359,16 @@ def cmd_label(a):
     if not os.path.exists(a.pending):
         print("summary labelled=0"); return 0
     pending = json.load(open(a.pending))
-    mail, done, failed, reason = Mail(), 0, 0, ""
-    for lab, ids in ((POSTED, pending.get("posted", [])), (IGNORED, pending.get("ignored", []))):
-        for mid in ids:
-            if reason == "HTTP 403":
+    session = requests.Session()
+    mails = {i + 1: Mail(ib, i + 1, session) for i, ib in enumerate(inbox_ids())}
+    done, failed, reason = 0, 0, ""
+    for lab, refs in ((POSTED, pending.get("posted", [])), (IGNORED, pending.get("ignored", []))):
+        for ref in refs:
+            n, mid = ref if isinstance(ref, list) else (1, ref)
+            if reason == "HTTP 403" or n not in mails:
                 failed += 1; continue  # key lacks permission; don't hammer the API
             try:
-                mail.label(mid, lab); done += 1
+                mails[n].label(mid, lab); done += 1
             except Exception as e:
                 failed += 1
                 m = re.search(r"HTTP \d+", str(e)); reason = m.group(0) if m else type(e).__name__

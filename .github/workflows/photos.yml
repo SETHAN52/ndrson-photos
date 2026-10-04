@@ -35,6 +35,7 @@ jobs:
         env:
           AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
           NDRSON_INBOX_ID: ${{ secrets.NDRSON_INBOX_ID }}
+          NDRSON_REMINDER_INBOX_ID: ${{ secrets.NDRSON_REMINDER_INBOX_ID }}
           NDRSON_ALLOWLIST: ${{ secrets.NDRSON_ALLOWLIST }}
         run: python scripts/post_photos.py fetch --pending "$RUNNER_TEMP/pending.json"
 
@@ -62,4 +63,5 @@ jobs:
         env:
           AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
           NDRSON_INBOX_ID: ${{ secrets.NDRSON_INBOX_ID }}
+          NDRSON_REMINDER_INBOX_ID: ${{ secrets.NDRSON_REMINDER_INBOX_ID }}
         run: python scripts/post_photos.py label --pending "$RUNNER_TEMP/pending.json"
