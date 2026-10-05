@@ -236,7 +236,7 @@ PAGE = """<!doctype html>
 <body>
 <header>
   <h1>ndrson.com</h1>
-  <p class="tag">a photo a day at <span class="clock">12:34</span></p>
+  <p class="tag">a photo a day at <span class="clock">12:34-ish</span></p>
 </header>
 <main>
 {body}
