@@ -6,6 +6,7 @@ All private data comes from environment variables (GitHub Actions secrets):
   NDRSON_INBOX_ID     the private posting inbox id (comma-separated list allowed)
   NDRSON_REMINDER_INBOX_ID  optional: the daily-reminder inbox id(s); family replies there are posted too
   NDRSON_ALLOWLIST    JSON: {"family": [{"name": "...", "phones": ["10digits"], "emails": ["..."]}]}
+                      Seth and Meribeth display as Dad and Mom; other names stay as given
   INKBOX_API_KEY      optional: Inkbox agent-scoped API key for @ndrson iMessage photo intake
 Nothing private is written to the repo or printed: logs contain counts only.
 
@@ -63,9 +64,13 @@ def inbox_ids():
 
 def family():
     try:
-        return json.loads(os.environ["NDRSON_ALLOWLIST"])["family"]
+        fam = json.loads(os.environ["NDRSON_ALLOWLIST"])["family"]
     except Exception:
         sys.exit("missing or invalid NDRSON_ALLOWLIST")
+    for person in fam:
+        if isinstance(person, dict) and person.get("name"):
+            person["name"] = display_name(person["name"])
+    return fam
 
 
 class Mail:
@@ -127,6 +132,17 @@ def phone_digits(s):
     return re.sub(r"\D", "", s or "")
 
 
+# Public labels. Allowlist entries may still use given names.
+DISPLAY_NAMES = {"seth": "Dad", "meribeth": "Mom"}
+
+
+def display_name(name):
+    """Seth -> Dad, Meribeth -> Mom. Everyone else keeps the name they already have."""
+    if not isinstance(name, str):
+        return name
+    return DISPLAY_NAMES.get(name.strip().casefold(), name)
+
+
 def sender_name_phone(e164, fam):
     digits = phone_digits(e164)
     if not digits:
@@ -139,7 +155,7 @@ def sender_name_phone(e164, fam):
             if not pd:
                 continue
             if pd == digits or pd[-10:] == last10:
-                return p["name"]
+                return display_name(p["name"])
     return None
 
 
@@ -276,11 +292,11 @@ def sender_name(from_header, fam):
     digits = re.sub(r"\D", "", local)
     for p in fam:
         if addr in [e.lower() for e in p.get("emails", [])]:
-            return p["name"]
+            return display_name(p["name"])
     for p in fam:
         for ph in p.get("phones", []):
             if ph and ph in digits and len(digits) <= 11:
-                return p["name"]
+                return display_name(p["name"])
     return None
 
 
@@ -353,7 +369,19 @@ def load_posts():
     return json.load(open(p)).get("posts", []) if os.path.exists(p) else []
 
 
+def apply_display_names(posts):
+    """Rewrite stored display names so a rebuild from posts.json shows Dad/Mom."""
+    changed = False
+    for p in posts:
+        shown = display_name(p.get("name"))
+        if shown != p.get("name"):
+            p["name"] = shown
+            changed = True
+    return changed
+
+
 def save_posts(posts):
+    apply_display_names(posts)
     posts.sort(key=lambda p: p["ts"], reverse=True)
     with open(os.path.join(ROOT, "posts.json"), "w") as f:
         json.dump({"posts": posts}, f, indent=1)
@@ -409,7 +437,10 @@ PAGE = """<!doctype html>
 
 
 def render():
-    posts = sorted(load_posts(), key=lambda p: p["ts"], reverse=True)
+    posts = load_posts()
+    if apply_display_names(posts):
+        save_posts(posts)
+    posts = sorted(posts, key=lambda p: p["ts"], reverse=True)
     if not posts:
         body = ('<div class="empty"><span class="clock">12:34</span>'
                 'No photos yet. The first one is coming soon.</div>')
@@ -420,12 +451,13 @@ def render():
             date_str = local.strftime("%A, %B %-d, %Y")
             badge = '<span class="badge">12:34</span>' if p.get("at1234") else ""
             cap = html.escape(p.get("caption") or "")
-            alt = html.escape(f"Photo from {p['name']}, {date_str}")
+            name = display_name(p["name"])
+            alt = html.escape(f"Photo from {name}, {date_str}")
             parts.append(
                 f'<article id="{p["id"]}">\n'
                 f'  <img src="{html.escape(p["src"])}" width="{p.get("w", "")}" height="{p.get("h", "")}" '
                 f'loading="{"eager" if i < 2 else "lazy"}" decoding="async" alt="{alt}">\n'
-                f'  <div class="meta"><span class="who">{html.escape(p["name"])}{badge}</span>'
+                f'  <div class="meta"><span class="who">{html.escape(name)}{badge}</span>'
                 f'<time class="when" datetime="{local.isoformat(timespec="minutes")}">{date_str}</time></div>\n'
                 + (f'  <p class="cap">{cap}</p>\n' if cap else '  <div class="pad"></div>\n')
                 + '</article>')
@@ -505,7 +537,8 @@ def cmd_fetch(a):
             print(f"error processing a message: {type(e).__name__}")
     # Optional iMessage intake (same family allowlist / EXIF strip / posts.json pipeline).
     fetch_imessage(fam, posts, have, stats)
-    if stats["photos"]:
+    names_changed = apply_display_names(posts)
+    if stats["photos"] or names_changed:
         save_posts(posts)
         render()
     with open(a.pending, "w") as f:
