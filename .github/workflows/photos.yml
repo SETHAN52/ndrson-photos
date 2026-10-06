@@ -37,6 +37,7 @@ jobs:
           NDRSON_INBOX_ID: ${{ secrets.NDRSON_INBOX_ID }}
           NDRSON_REMINDER_INBOX_ID: ${{ secrets.NDRSON_REMINDER_INBOX_ID }}
           NDRSON_ALLOWLIST: ${{ secrets.NDRSON_ALLOWLIST }}
+          INKBOX_API_KEY: ${{ secrets.INKBOX_API_KEY }}
         run: python scripts/post_photos.py fetch --pending "$RUNNER_TEMP/pending.json"
 
       - name: Commit and push

@@ -6,6 +6,7 @@ All private data comes from environment variables (GitHub Actions secrets):
   NDRSON_INBOX_ID     the private posting inbox id (comma-separated list allowed)
   NDRSON_REMINDER_INBOX_ID  optional: the daily-reminder inbox id(s); family replies there are posted too
   NDRSON_ALLOWLIST    JSON: {"family": [{"name": "...", "phones": ["10digits"], "emails": ["..."]}]}
+  INKBOX_API_KEY      optional: Inkbox agent-scoped API key for @ndrson iMessage photo intake
 Nothing private is written to the repo or printed: logs contain counts only.
 
 Usage (run from the repo root):
@@ -55,8 +56,8 @@ def inbox_ids():
             v = v.strip()
             if v and v.lower() not in [o.lower() for o in out]:
                 out.append(v)
-    if not out:
-        sys.exit("missing NDRSON_INBOX_ID")
+    if not out and not inkbox_key():
+        sys.exit("missing NDRSON_INBOX_ID (or INKBOX_API_KEY for iMessage)")
     return out
 
 
@@ -104,6 +105,166 @@ class Mail:
 
     def label(self, mid, lab):
         self._req("PATCH", f"/messages/{quote(mid, safe='')}", json={"add_labels": [lab]})
+
+
+
+# ---------------- inkbox imessage ----------------
+INKBOX_API = os.environ.get("INKBOX_BASE_URL", "https://inkbox.ai").rstrip("/") + "/api/v1"
+
+
+def inkbox_key():
+    """Optional Inkbox agent key for iMessage intake. Never required if mail alone is configured."""
+    for var in ("INKBOX_API_KEY", "INKBOX_NDRSON_API_KEY"):
+        k = os.environ.get(var, "").strip()
+        if k.startswith(var + "="):
+            k = k.split("=", 1)[1].strip()
+        if k:
+            return k
+    return None
+
+
+def phone_digits(s):
+    return re.sub(r"\D", "", s or "")
+
+
+def sender_name_phone(e164, fam):
+    digits = phone_digits(e164)
+    if not digits:
+        return None
+    # Prefer last-10 match so +1 / bare 10-digit allowlist entries both work.
+    last10 = digits[-10:] if len(digits) >= 10 else digits
+    for p in fam:
+        for ph in p.get("phones", []):
+            pd = phone_digits(ph)
+            if not pd:
+                continue
+            if pd == digits or pd[-10:] == last10:
+                return p["name"]
+    return None
+
+
+class InkboxIMessage:
+    def __init__(self, session=None):
+        self.s = session or requests.Session()
+        self.s.headers["X-API-Key"] = inkbox_key()
+        self.base = INKBOX_API + "/imessage"
+
+    def _req(self, method, path, **kw):
+        r = self.s.request(method, self.base + path, timeout=60, **kw)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Inkbox iMessage {method} {path.split('?',1)[0]} -> HTTP {r.status_code}")
+        return r.json() if r.content else {}
+
+    def list_messages(self, *, limit=100, offset=0, is_read=None):
+        params = {"limit": limit, "offset": offset}
+        if is_read is not None:
+            params["is_read"] = "true" if is_read else "false"
+        return self._req("GET", "/messages", params=params)
+
+    def mark_read(self, conversation_id):
+        self._req("POST", "/mark-read", json={"conversation_id": conversation_id})
+
+    def download_media(self, url):
+        # Inbound media URLs are short-lived and presigned; do not attach the API key.
+        r = requests.get(url, timeout=120)
+        r.raise_for_status()
+        return r.content
+
+
+def fetch_imessage(fam, posts, have, stats):
+    """Pull inbound iMessage photos from the dedicated @ndrson identity into the same post pipeline."""
+    if not inkbox_key():
+        return
+    box = InkboxIMessage()
+    stats.setdefault("imessage_seen", 0)
+    stats.setdefault("imessage_posted_msgs", 0)
+    stats.setdefault("imessage_ignored", 0)
+    stats.setdefault("imessage_photos", 0)
+    stats.setdefault("imessage_errors", 0)
+    to_mark = set()
+    offset = 0
+    while True:
+        try:
+            batch = box.list_messages(limit=100, offset=offset, is_read=False)
+        except Exception as e:
+            stats["imessage_errors"] += 1
+            print(f"error listing imessage: {type(e).__name__}")
+            break
+        if not isinstance(batch, list):
+            break
+        if not batch:
+            break
+        for item in batch:
+            stats["imessage_seen"] += 1
+            if (item.get("direction") or "") != "inbound":
+                continue
+            media = item.get("media") or []
+            mid = item.get("id")
+            if not mid:
+                continue
+            name = sender_name_phone(item.get("remote_number") or item.get("sender_number"), fam)
+            if not name:
+                stats["imessage_ignored"] += 1
+                if item.get("conversation_id"):
+                    to_mark.add(item["conversation_id"])
+                continue
+            key = key_for("imsg:" + mid)
+            if any(h.startswith(key + "-") for h in have):
+                if item.get("conversation_id"):
+                    to_mark.add(item["conversation_id"])
+                continue
+            if not media:
+                stats["imessage_ignored"] += 1
+                if item.get("conversation_id"):
+                    to_mark.add(item["conversation_id"])
+                continue
+            try:
+                local = parse_ts(item.get("created_at")).astimezone(TZ)
+                caption = clean_caption(item.get("content"))
+                made = 0
+                for idx, att in enumerate(media):
+                    url = att.get("url") if isinstance(att, dict) else None
+                    ct = ((att.get("content_type") or "") if isinstance(att, dict) else "").lower()
+                    if not url:
+                        continue
+                    if ct and not (ct.startswith("image/") or ct in ("application/octet-stream",)):
+                        # Skip non-image media (audio/video/pdf)
+                        if not ct.startswith("image/"):
+                            continue
+                    pid = f"{key}-{idx}"
+                    if pid in have:
+                        made += 1
+                        continue
+                    data = box.download_media(url)
+                    rel = f"photos/{local.strftime('%Y-%m-%d-%H%M')}-{hashlib.sha256(pid.encode()).hexdigest()[:8]}.jpg"
+                    try:
+                        (w, h), taken = clean_image(data, os.path.join(ROOT, rel))
+                    except Exception:
+                        continue
+                    at1234 = (taken is not None and taken.hour in (0, 12) and taken.minute == 34) or \
+                             (local.hour == 12 and local.minute in (34, 35))
+                    posts.append({"id": pid, "ts": local.isoformat(timespec="seconds"), "name": name, "src": rel,
+                                  "w": w, "h": h, "caption": caption if made == 0 else "", "at1234": bool(at1234)})
+                    have.add(pid); made += 1; stats["imessage_photos"] += 1; stats["photos"] += 1
+                if made:
+                    stats["imessage_posted_msgs"] += 1
+                else:
+                    stats["imessage_ignored"] += 1
+                if item.get("conversation_id"):
+                    to_mark.add(item["conversation_id"])
+            except Exception as e:
+                stats["imessage_errors"] += 1
+                print(f"error processing an imessage: {type(e).__name__}")
+        if len(batch) < 100:
+            break
+        offset += len(batch)
+        if offset > 2000:
+            break
+    for cid in to_mark:
+        try:
+            box.mark_read(cid)
+        except Exception:
+            pass  # best-effort; posts.json dedupe still prevents re-posts
 
 
 # ---------------- helpers ----------------
@@ -278,7 +439,8 @@ def render():
 def cmd_fetch(a):
     fam = family()
     session = requests.Session()
-    mails = [Mail(ib, i + 1, session) for i, ib in enumerate(inbox_ids())]
+    ids = inbox_ids()
+    mails = [Mail(ib, i + 1, session) for i, ib in enumerate(ids)] if ids else []
     own = {m.addr for m in mails}
     posts = load_posts()
     have = {p["id"] for p in posts}
@@ -341,6 +503,8 @@ def cmd_fetch(a):
         except Exception as e:
             stats["errors"] += 1
             print(f"error processing a message: {type(e).__name__}")
+    # Optional iMessage intake (same family allowlist / EXIF strip / posts.json pipeline).
+    fetch_imessage(fam, posts, have, stats)
     if stats["photos"]:
         save_posts(posts)
         render()
