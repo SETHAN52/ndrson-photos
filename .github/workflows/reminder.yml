@@ -1,0 +1,47 @@
+name: 12:34 reminder
+
+# Triggered only by cron-job.org via the workflow_dispatch API (GitHub `schedule` is unreliable).
+on:
+  workflow_dispatch:
+    inputs:
+      group:
+        description: Which reminder group to send
+        required: true
+        type: choice
+        options: [central, eastern]
+      dry_run:
+        description: Do every check but send nothing
+        required: false
+        type: boolean
+        default: false
+      force:
+        description: Ignore the 12:00-15:00 local-time window (never double-sends)
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reminder-${{ inputs.group }}
+  cancel-in-progress: false
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          sparse-checkout: scripts
+
+      # Secrets are passed only via env; the script prints names and ok/skip/fail only.
+      - name: Send reminders
+        env:
+          AGENTMAIL_API_KEY: ${{ secrets.AGENTMAIL_API_KEY }}
+          NDRSON_REMINDER_RECIPIENTS: ${{ secrets.NDRSON_REMINDER_RECIPIENTS }}
+          GROUP: ${{ inputs.group }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          FORCE: ${{ inputs.force }}
+        run: python3 scripts/send_reminders.py
